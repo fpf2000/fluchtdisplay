@@ -52,7 +52,7 @@ String decodedMsg;
 Max72xxPanel matrix = Max72xxPanel(pinCS, numberOfHorizontalDisplays, numberOfVerticalDisplays);
 
 String tape = "Arduino";
-int wait = 50; // In milliseconds
+int wait = 80; // In milliseconds
 
 int spacer = 2;
 int width = 5 + spacer; // The font width is 5 pixels

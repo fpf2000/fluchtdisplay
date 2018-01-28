@@ -9,6 +9,7 @@
 #include <ESP8266WiFiAP.h>
 #include <WiFiClientSecure.h>
 #include <WiFiUdp.h>
+#include <Ticker.h>
 
 #include <Dhcp.h>
 #include <EthernetClient.h>
@@ -23,7 +24,6 @@ NodeMCU pins    -> EasyMatrix pins
 MOSI-D7-GPIO13  -> DIN
 CLK-D5-GPIO14   -> Clk
 GPIO0-D3        -> LOAD
-
 */
 
 #include <ESP8266WiFi.h>
@@ -31,6 +31,25 @@ GPIO0-D3        -> LOAD
 #include <SPI.h>
 #include <Adafruit_GFX.h>
 #include <Max72xxPanel.h>
+
+// Darueber signalisieren wir, ob etwas getan werden soll.
+enum Signal {
+  unknown,
+  DO,
+  DONE
+};
+
+// Darueber signalisieren wir, ob json gepusht werden soll
+volatile Signal pushSensornetDataSignal = unknown;
+
+IPAddress sensornetHost(185, 100, 84, 206); //collector server
+unsigned int sensornetPort = 9910;  //sensornet UDP Port
+unsigned int localPort = 9911;     //local UDP Port
+String rconUser = "tutorial";    //rcon user
+String rconSecret = "peitsch";  //rcon secret
+String rconCommand = "";       //rcon kommando (user:secret command)
+WiFiUDP udp;
+Ticker sensornetTicker;
 
 #define SSID "Freifunk Erfurt"                      // insert your SSID
 #define PASS ""                    // insert your password
@@ -52,17 +71,17 @@ String decodedMsg;
 Max72xxPanel matrix = Max72xxPanel(pinCS, numberOfHorizontalDisplays, numberOfVerticalDisplays);
 
 String tape = "Arduino";
-int wait = 50; // In milliseconds
+int wait = 100; // In milliseconds
 
 int spacer = 2;
 int width = 5 + spacer; // The font width is 5 pixels
 
 /*
-  handles the messages coming from the webbrowser, restores a few special characters and 
+  handles the messages coming from the webbrowser, restores a few special characters and
   constructs the strings that can be sent to the oled display
 */
 void handle_msg() {
-                        
+
   matrix.fillScreen(LOW);
   server.send(200, "text/html", form);    // Send same page so they can send another msg
   refresh=1;
@@ -71,32 +90,168 @@ void handle_msg() {
   Serial.println(msg);
   decodedMsg = msg;
   // Restore special characters that are misformed to %char by the client browser
-  decodedMsg.replace("+", " ");      
-  decodedMsg.replace("%21", "!");  
-  decodedMsg.replace("%22", "");  
+  decodedMsg.replace("+", " ");
+  decodedMsg.replace("%21", "!");
+  decodedMsg.replace("%22", "");
   decodedMsg.replace("%23", "#");
   decodedMsg.replace("%24", "$");
-  decodedMsg.replace("%25", "%");  
+  decodedMsg.replace("%25", "%");
   decodedMsg.replace("%26", "&");
-  decodedMsg.replace("%27", "'");  
+  decodedMsg.replace("%27", "'");
   decodedMsg.replace("%28", "(");
   decodedMsg.replace("%29", ")");
   decodedMsg.replace("%2A", "*");
-  decodedMsg.replace("%2B", "+");  
-  decodedMsg.replace("%2C", ",");  
-  decodedMsg.replace("%2F", "/");   
-  decodedMsg.replace("%3A", ":");    
-  decodedMsg.replace("%3B", ";");  
-  decodedMsg.replace("%3C", "<");  
-  decodedMsg.replace("%3D", "=");  
+  decodedMsg.replace("%2B", "+");
+  decodedMsg.replace("%2C", ",");
+  decodedMsg.replace("%2F", "/");
+  decodedMsg.replace("%3A", ":");
+  decodedMsg.replace("%3B", ";");
+  decodedMsg.replace("%3C", "<");
+  decodedMsg.replace("%3D", "=");
   decodedMsg.replace("%3E", ">");
-  decodedMsg.replace("%3F", "?");  
-  decodedMsg.replace("%40", "@"); 
+  decodedMsg.replace("%3F", "?");
+  decodedMsg.replace("%40", "@");
   //Serial.println(decodedMsg);                   // print original string to monitor
- 
- 
-    
+  talk2irc("#erfurt", decodedMsg);
+
+
   //Serial.println(' ');                          // new line in monitor
+}
+
+
+//----------------------
+// startUDP()
+//
+// UDP starten ...
+//----------------------
+void startUDP(void) {
+    udp.begin(localPort);
+    Serial.println("UDP started");
+}
+
+//-----------------
+//readUDP()
+//
+// Nachsehen, ob wir etwas aus dem UDP Empfangspuffer lesen können
+//-----------------
+void readUDP() {
+   char rcvbuffer[16];
+  delay(2000);
+  int cb = udp.parsePacket();
+  if (!cb) {
+    //Serial.println("no packet yet");
+  }
+  else {
+    Serial.print("UDP packet received, length=");
+    Serial.println(cb);
+    udp.read(rcvbuffer, 16);
+    Serial.println(rcvbuffer);
+  }
+}
+
+//-----------------------
+// enableSensornetPushDataSignal()
+//
+// Wird vom Ticker getriggert.
+// Interrupt-like. So kurz wie moeglich..
+//-----------------------
+void enableSensornetPushDataSignal(void) {
+  pushSensornetDataSignal = DO;
+}
+
+//-----------------------------
+// pushSensornetData()
+//
+// Daten zur Sammelstelle puschen
+//-----------------------------
+void pushSensornetData(void) {
+  rconCommand = "";
+  rconCommand += rconUser;
+  rconCommand += ":";
+  rconCommand += rconSecret;
+  rconCommand += " ";
+  rconCommand += "setsensors ";
+
+  String message = rconCommand;
+  message += "{";
+  message +=  "\"version\": \"0.3\",";
+  message +=  "\"id\": \"f4ed3a73b46a\",";
+  message +=  "\"nickname\": \"Bytespeicher_Display\",";
+  message +=  "\"sensors\": ";
+  message +=  "{";
+  message +=   "\"display\": ";
+  message +=   "[";
+  message +=    "{";
+  message +=     "\"name\": \"Bytespeicher Display\",";
+  message +=     "\"value\": \"";
+  message +=     decodedMsg;
+  message +=     "\",";
+  message +=     "\"unit\": \"text\"";
+  message +=    "}";
+  message +=   "]";
+  message +=  "},";
+  message +=  "\"system\": ";
+  message +=  "{";
+  message +=   "\"voltage\": ";
+  message +=   0;
+  message +=   ",";
+  message +=   "\"IP\": \"";
+  message +=   ipToString(WiFi.localIP());
+  message +=   "\",";
+  message +=   "\"timestamp\": 0,";
+  message +=   "\"uptime\": 0,";
+  message +=   "\"heap\": 0";
+  message +=  "}";
+  message += "}\n";
+
+  int message_len = message.length() + 1;
+
+  char msgbuffer[message_len];
+
+  message.toCharArray(msgbuffer, message_len);
+
+  udp.beginPacket(sensornetHost, sensornetPort);
+  udp.write(msgbuffer);
+  udp.endPacket();
+  Serial.println(msgbuffer);
+
+  readUDP();
+}
+
+String ipToString(IPAddress ip){
+  String s="";
+  for (int i=0; i<4; i++)
+    s += i  ? "." + String(ip[i]) : String(ip[i]);
+  return s;
+}
+
+void talk2irc(String channel, String msg){
+  rconCommand = "";
+  rconCommand += rconUser;
+  rconCommand += ":";
+  rconCommand += rconSecret;
+  rconCommand += " ";
+  rconCommand += "talk";
+  rconCommand += " ";
+
+  String message = rconCommand;
+  message += channel;
+  message += " ";
+  message += "[Bytespeicher Display] ";
+  message += msg;
+
+  int message_len = message.length() + 1;
+
+  char msgbuffer[message_len];
+
+  message.toCharArray(msgbuffer, message_len);
+
+  udp.beginPacket(sensornetHost, sensornetPort);
+  udp.write(msgbuffer);
+  udp.endPacket();
+  Serial.println(msgbuffer);
+
+  readUDP();
 }
 
 void setup(void) {
@@ -116,25 +271,29 @@ matrix.setIntensity(10); // Use a value between 0 and 15 for brightness
   matrix.setRotation(2, 1); // Display 3 mit 90°
   matrix.setRotation(3, 1); // Display 4 mit 90°
 
-//ESP.wdtDisable();                               // used to debug, disable wachdog timer, 
+//ESP.wdtDisable();                               // used to debug, disable wachdog timer,
   Serial.begin(115200);                           // full speed to monitor
-                               
+
   WiFi.begin(SSID, PASS);                         // Connect to WiFi network
   while (WiFi.status() != WL_CONNECTED) {         // Wait for connection
     delay(500);
     Serial.print(".");
   }
+
+  startUDP();
+  sensornetTicker.attach(60, enableSensornetPushDataSignal);
+
   // Set up the endpoints for HTTP server,  Endpoints can be written as inline functions:
   server.on("/", []() {
     server.send(200, "text/html", form);
   });
   server.on("/msg", handle_msg);                  // And as regular external functions:
-  server.begin();                                 // Start the server 
+  server.begin();                                 // Start the server
 
 
   Serial.print("SSID : ");                        // prints SSID in monitor
-  Serial.println(SSID);                           // to monitor             
- 
+  Serial.println(SSID);                           // to monitor
+
   char result[16];
   sprintf(result, "%3d.%3d.%1d.%3d", WiFi.localIP()[0], WiFi.localIP()[1], WiFi.localIP()[2], WiFi.localIP()[3]);
   Serial.println();
@@ -144,7 +303,8 @@ matrix.setIntensity(10); // Use a value between 0 and 15 for brightness
 
   Serial.println(WiFi.localIP());                 // Serial monitor prints localIP
   Serial.print(analogRead(A0));
-  
+
+
 }
 
 
@@ -159,7 +319,7 @@ void loop(void) {
     int letter = i / width;
     int x = (matrix.width() - 1) - i % width;
     int y = (matrix.height() - 8) / 2; // center the text vertically
- 
+
     while ( x + width - spacer >= 0 && letter >= 0 ) {
       if ( letter < decodedMsg.length() ) {
         matrix.drawChar(x, y, decodedMsg[letter], HIGH, LOW, 1);
@@ -173,6 +333,10 @@ void loop(void) {
 
     delay(wait);
   }
-}
 
-
+  if (pushSensornetDataSignal == DO)
+  {
+    pushSensornetData();
+    pushSensornetDataSignal = DONE;
+  }
+} 
