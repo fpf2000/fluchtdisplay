@@ -1,3 +1,23 @@
+#include <WiFiServer.h>
+#include <ESP8266WiFiSTA.h>
+#include <ESP8266WiFi.h>
+#include <WiFiClient.h>
+#include <ESP8266WiFiGeneric.h>
+#include <ESP8266WiFiMulti.h>
+#include <ESP8266WiFiType.h>
+#include <ESP8266WiFiScan.h>
+#include <ESP8266WiFiAP.h>
+#include <WiFiClientSecure.h>
+#include <WiFiUdp.h>
+#include <Ticker.h>
+
+#include <Dhcp.h>
+#include <EthernetClient.h>
+#include <EthernetUdp.h>
+#include <Dns.h>
+#include <Ethernet.h>
+#include <EthernetServer.h>
+
 /*
 Project: Wifi controlled LED matrix display
 NodeMCU pins    -> EasyMatrix pins
@@ -6,71 +26,34 @@ CLK-D5-GPIO14   -> Clk
 GPIO0-D3        -> LOAD
 */
 
-#include <WiFiUdp.h>
-#include <Ticker.h>
+#include <ESP8266WiFi.h>
 #include <ESP8266WebServer.h>
+#include <SPI.h>
 #include <Adafruit_GFX.h>
 #include <Max72xxPanel.h>
 
-/*     Alles überflüssige includes?
-//#include <WiFiServer.h>
-//#include <ESP8266WiFiSTA.h>
-//#include <ESP8266WiFi.h>
-//#include <WiFiClient.h>
-//#include <ESP8266WiFiGeneric.h>
-//#include <ESP8266WiFiMulti.h>
-//#include <ESP8266WiFiType.h>
-//#include <ESP8266WiFiScan.h>
-//#include <ESP8266WiFiAP.h>
-//#include <WiFiClientSecure.h>
-//#include <Dhcp.h>
-//#include <EthernetClient.h>
-//#include <EthernetUdp.h>
-//#include <Dns.h>
-//#include <Ethernet.h>
-//#include <EthernetServer.h>
-//#include <ESP8266WiFi.h>
-//#include <SPI.h>
-*/
+// Darueber signalisieren wir, ob etwas getan werden soll.
+enum Signal {
+  unknown,
+  DO,
+  DONE
+};
 
+// Darueber signalisieren wir, ob json gepusht werden soll
+volatile Signal pushSensornetDataSignal = unknown;
 
+IPAddress sensornetHost(185, 100, 84, 206); //collector server
+unsigned int sensornetPort = 9910;  //sensornet UDP Port
+unsigned int localPort = 9911;     //local UDP Port
+String rconUser = "tutorial";    //rcon user
+String rconSecret = "peitsch";  //rcon secret
+String rconCommand = "";       //rcon kommando (user:secret command)
+WiFiUDP udp;
+String ip("");
+Ticker sensornetTicker;
 
-//----------------------
-// Konfigurationsbereich
-//----------------------
-
-// network related
-#define WIFI_SSID "Freifunk Erfurt"                   // insert your SSID
-#define WIFI_PASS ""                                  // insert your password
-WiFiUDP          udp;                                 // bind ip/udp functionality
-String           ip("");                              // current wifi IP
-ESP8266WebServer server(80);                          // HTTP server will listen at port 80
-
-// rcon related
-IPAddress        sensornetHost(185, 100, 84, 206);         // collector server
-unsigned int     sensornetPort              = 9910;        // sensornet UDP Port
-unsigned int     localPort                  = 9911;        // local UDP Port
-String           rconUser                   = "tutorial";  // rcon user
-String           rconSecret                 = "peitsch";   // rcon secret
-String           rconCommand                = "";          // rcon command (user:secret command)
-// sensornet related
-enum Signal      { unknown, DO, DONE };                    // Darueber signalisieren wir, ob etwas getan werden soll.
-volatile Signal  pushSensornetDataSignal    = unknown;     // Darueber signalisieren wir, ob json gepusht werden soll
-Ticker           sensornetTicker;                          // setup cyclic trigger for sensor reporting
-
-// display related
-long             period;
-String           decodedMsg;
-int              offset=1,refresh           = 0;
-int              pinCS                      = 0;           // Attach CS to this pin, DIN to MOSI and CLK to SCK (cf http://arduino.cc/en/Reference/SPI )
-int              wait                       = 100;         // In milliseconds
-int spacer                                  = 2;
-int width                                   = 5 + spacer;  // The font width is 5 pixels
-int              numberOfHorizontalDisplays = 4;
-int              numberOfVerticalDisplays   = 1;
-Max72xxPanel     matrix = Max72xxPanel(pinCS, numberOfHorizontalDisplays, numberOfVerticalDisplays);
-
-
+#define WIFI_SSID "Freifunk Erfurt"     // insert your SSID
+#define WIFI_PASS ""                    // insert your password
 // ******************* String form to sent to the client-browser ************************************
 String form =
   "<p>"
@@ -79,10 +62,21 @@ String form =
   "<form action='msg'><p>Gebe hier dein Displaytext ein <input type='text' name='msg' size=100 autofocus> <input type='submit' value='Submit'></form>"
   "</center>";
 
+ESP8266WebServer server(80);                             // HTTP server will listen at port 80
+long period;
+int offset=1,refresh=0;
+int pinCS = 0; // Attach CS to this pin, DIN to MOSI and CLK to SCK (cf http://arduino.cc/en/Reference/SPI )
+int numberOfHorizontalDisplays = 4;
+int numberOfVerticalDisplays = 1;
+String decodedMsg;
+Max72xxPanel matrix = Max72xxPanel(pinCS, numberOfHorizontalDisplays, numberOfVerticalDisplays);
 
-//----------------------
-// Funktionen und Klassen
-//----------------------
+String tape = "Arduino";
+int wait = 100; // In milliseconds
+
+int spacer = 2;
+int width = 5 + spacer; // The font width is 5 pixels
+
 /*
   handles the messages coming from the webbrowser, restores a few special characters and
   constructs the strings that can be sent to the oled display
@@ -119,7 +113,7 @@ void handle_msg() {
   decodedMsg.replace("%3F", "?");
   decodedMsg.replace("%40", "@");
   //Serial.println(decodedMsg);                   // print original string to monitor
-  talk2irc("#achtbitlobby", decodedMsg);
+  talk2irc("#erfurt", decodedMsg);
 
 
   //Serial.println(' ');                          // new line in monitor
@@ -182,13 +176,13 @@ void startWIFI(void) {
 // HTTP starten....
 //----------------------
 void startHTTP(void) {
-  // Set up the endpoints for HTTP server,  Endpoints can be written as inline functions:
-  server.on("/", []() {
-    server.send(200, "text/html", form);
-  });
-  server.on("/msg", handle_msg);                  // And as regular external functions:
-  server.begin();                                 // Start the server
-  Serial.println("WebServer ready!   ");
+    // Set up the endpoints for HTTP server,  Endpoints can be written as inline functions:
+    server.on("/", []() {
+      server.send(200, "text/html", form);
+    });
+    server.on("/msg", handle_msg);                  // And as regular external functions:
+    server.begin();                                 // Start the server
+    Serial.println("WebServer ready!   ");
 }
 
 
@@ -199,8 +193,8 @@ void startHTTP(void) {
 // UDP starten ...
 //----------------------
 void startUDP(void) {
-  udp.begin(localPort);
-  Serial.println("UDP started");
+    udp.begin(localPort);
+    Serial.println("UDP started");
 }
 
 //-----------------
@@ -209,7 +203,7 @@ void startUDP(void) {
 // Nachsehen, ob wir etwas aus dem UDP Empfangspuffer lesen können
 //-----------------
 void readUDP() {
-  char rcvbuffer[16];
+   char rcvbuffer[16];
   delay(2000);
   int cb = udp.parsePacket();
   if (!cb) {
@@ -328,20 +322,40 @@ void talk2irc(String channel, String msg){
   readUDP();
 }
 
-
-//----------------------
-// setup() und loop()
-//----------------------
-
 void setup(void) {
-  //ESP.wdtDisable();                               // used to debug, disable wachdog timer,
+
   setupMATRIX();
-  Serial.begin(115200);                             // full speed to monitor
+  //ESP.wdtDisable();                               // used to debug, disable wachdog timer,
+  Serial.begin(115200);                           // full speed to monitor
+  /*
+  *     Ersetzt durch Funktion
+  WiFi.begin(SSID, PASS);                         // Connect to WiFi network
+  while (WiFi.status() != WL_CONNECTED) {         // Wait for connection
+    delay(500);
+    Serial.print(".");
+  }
+  */
   startWIFI();
   startUDP();
   startHTTP();
   sensornetTicker.attach(60, enableSensornetPushDataSignal);
+  /*
+   *    Ersetzt durch Funktion??
+  Serial.print("SSID : ");                        // prints SSID in monitor
+  Serial.println(SSID);                           // to monitor
+
+  char result[16];
+  sprintf(result, "%3d.%3d.%1d.%3d", WiFi.localIP()[0], WiFi.localIP()[1], WiFi.localIP()[2], WiFi.localIP()[3]);
+  Serial.println();
+  Serial.println(result);
+  decodedMsg = result;
+  */
   decodedMsg = ip;
+
+  /*
+   *          Ersetzt druch StartWifi?
+  Serial.println(WiFi.localIP());                 // Serial monitor prints localIP
+  */
   Serial.print(analogRead(A0));
 }
 

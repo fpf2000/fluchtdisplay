@@ -6,3 +6,8 @@ Beispiel (ohne fkt)
 http://10.99.19.160/msg?msg=Verspaetungsbericht_Ueber_Linie_2&Channel=TrafficInfo
 
 
+
+
+sudo -i
+wpa_passphrase "WLAN-NAME" "WLAN-PASSWORT" >> /etc/wpa_supplicant/wpa_supplicant.conf
+exit
